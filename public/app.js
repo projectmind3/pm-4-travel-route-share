@@ -470,7 +470,7 @@
   }
 
   function authFail(err) {
-    if (err.status === 401) { toast('请先登录'); goLogin(location.hash); return true; }
+    if (err.status === 401) { clearAuth(); toast('请先登录'); goLogin(location.hash); return true; }
     if (err.status === 403) { toast('只有作者本人可以修改'); return true; }
     return false;
   }
