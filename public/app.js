@@ -462,6 +462,10 @@
       if (t.transport) app.appendChild(section('交通', textBlock(t.transport)));
       if (t.lodging) app.appendChild(section('住宿', textBlock(t.lodging)));
       if (t.tips) app.appendChild(section('小贴士与心得', textBlock(t.tips)));
+      if (canEdit) {
+        app.appendChild(h('div', { class: 'fab-space', 'aria-hidden': 'true' }));
+        app.appendChild(h('button', { class: 'fab', type: 'button', text: '＋', 'aria-label': '添加节点', onclick: function () { openAddSpot(t); } }));
+      }
     }, function (err) {
       clear(app);
       app.appendChild(errorBox(err, function () { renderDetail(id); }));
@@ -473,6 +477,100 @@
     if (err.status === 401) { clearAuth(); toast('请先登录'); goLogin(location.hash); return true; }
     if (err.status === 403) { toast('只有作者本人可以修改'); return true; }
     return false;
+  }
+
+  // 详情页「＋」：给当前行程追加一个节点
+  var closeAddSpot = null;
+  function openAddSpot(t) {
+    if (closeAddSpot) closeAddSpot();
+    var days = t.days || [];
+    var pos = null;
+    var view = DEFAULT_VIEW;
+    days.forEach(function (d) { (d.spots || []).forEach(function (s) { if (validPos(s)) view = { center: [s.lat, s.lng], zoom: 13 }; }); });
+
+    var sel = h('select', { 'aria-label': '加到哪一天' });
+    days.forEach(function (d, i) {
+      sel.appendChild(h('option', { value: String(i), text: '第 ' + (i + 1) + ' 天' + (d.title ? ' ' + d.title : '') }));
+    });
+    sel.appendChild(h('option', { value: 'new', text: '＋ 新建一天' }));
+    sel.value = days.length ? String(days.length - 1) : 'new';
+    var dayTitle = h('input', { type: 'text', maxlength: '60', placeholder: '例如：古城漫步' });
+    var dayTitleBox = h('div', {}, h('label', { text: '这一天的主题（可选）' }), dayTitle);
+    function syncDay() { dayTitleBox.hidden = sel.value !== 'new'; }
+    sel.addEventListener('change', syncDay);
+    syncDay();
+
+    var nameIn = h('input', { type: 'text', maxlength: '80', placeholder: '节点名称，例如：西湖断桥' });
+    var noteIn = h('textarea', { placeholder: '备注（可选）' });
+    var posText = h('span', { class: 'hint' });
+    var clearPos = h('button', { class: 'btn', type: 'button', text: '清除位置', hidden: true, onclick: function () { pos = null; syncPos(); } });
+    function syncPos() {
+      posText.textContent = pos ? '已选位置：' + fmtPos(pos.lat, pos.lng) : '未选择位置（可选）';
+      clearPos.hidden = !pos;
+    }
+    syncPos();
+    var pickBtn = h('button', { class: 'btn', type: 'button', text: '📍 选择位置', onclick: function () {
+      openPicker(pos, view, function (lat, lng) { pos = { lat: lat, lng: lng }; syncPos(); });
+    } });
+
+    var errBox = h('div');
+    var saveBtn = h('button', { class: 'btn primary', type: 'submit', text: '保存' });
+    var overlay = h('div', { class: 'picker add-spot', role: 'dialog', 'aria-modal': 'true', 'aria-label': '添加节点' });
+    function shut() {
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('hashchange', shut);
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      if (closeAddSpot === shut) closeAddSpot = null;
+    }
+    function onKey(e) { if (e.key === 'Escape' && !closePicker) shut(); }
+    function fail(msg) { clear(errBox); errBox.appendChild(h('div', { class: 'err', text: msg })); }
+
+    var form = h('form', { novalidate: true, onsubmit: function (e) {
+      e.preventDefault();
+      clear(errBox);
+      var name = nameIn.value.trim();
+      if (!name) { fail('请填写节点名称。'); nameIn.focus(); return; }
+      var spot = { name: name, note: noteIn.value.trim() };
+      if (pos) { spot.lat = pos.lat; spot.lng = pos.lng; }
+      var newDays = JSON.parse(JSON.stringify(days));
+      newDays.forEach(function (d) { (d.spots || []).forEach(function (s) { delete s._no; }); });
+      if (sel.value === 'new') newDays.push({ title: dayTitle.value.trim(), spots: [spot] });
+      else {
+        var d = newDays[Number(sel.value)];
+        if (!d.spots) d.spots = [];
+        d.spots.push(spot);
+      }
+      var body = {
+        title: t.title, destination: t.destination, summary: t.summary || '', transport: t.transport || '',
+        lodging: t.lodging || '', tips: t.tips || '', days: newDays,
+        budget: t.budget || [], photoIds: (t.photoIds || []).slice()
+      };
+      var opts = { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+      if (!t.userId) opts.headers['X-Edit-Key'] = getKeys()[t.id] || '';
+      saveBtn.disabled = true;
+      api('/api/trips/' + encodeURIComponent(t.id), opts).then(function () {
+        shut();
+        toast('节点已添加 ✓');
+        renderDetail(t.id);
+      }, function (err) {
+        saveBtn.disabled = false;
+        if (authFail(err)) shut(); else fail(err.message);
+      });
+    } },
+      h('div', {}, h('label', { text: '加到哪一天' }), sel),
+      dayTitleBox,
+      h('div', {}, h('label', { text: '节点名称（必填）' }), nameIn),
+      h('div', {}, h('label', { text: '备注' }), noteIn),
+      h('div', { class: 'add-spot-pos' }, pickBtn, clearPos, posText),
+      errBox,
+      h('div', { class: 'actions' }, saveBtn, h('button', { class: 'btn', type: 'button', text: '取消', onclick: shut })));
+    overlay.appendChild(h('div', { class: 'picker-card' }, h('h3', { text: '＋ 添加节点' }), form));
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) shut(); });
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('hashchange', shut);
+    document.body.appendChild(overlay);
+    closeAddSpot = shut;
+    nameIn.focus();
   }
 
   function doDelete(t, btn) {
