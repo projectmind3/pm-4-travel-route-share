@@ -93,6 +93,20 @@ function isObj(v) {
   return v && typeof v === "object" && !Array.isArray(v);
 }
 
+function coords(s) {
+  const has = (v) => v !== undefined && v !== null;
+  if (!has(s.lat) && !has(s.lng)) return { lat: null, lng: null };
+  if (!has(s.lat) || !has(s.lng)) throw new HttpError(400, "lat and lng must be given together");
+  const check = (v, key, lim) => {
+    if (typeof v !== "number" || !Number.isFinite(v) || v < -lim || v > lim) {
+      throw new HttpError(400, `${key} must be a number between -${lim} and ${lim}`);
+    }
+  };
+  check(s.lat, "lat", 90);
+  check(s.lng, "lng", 180);
+  return { lat: s.lat, lng: s.lng };
+}
+
 function validateTrip(body) {
   if (!isObj(body)) throw new HttpError(400, "body must be a JSON object");
   const trip = {
@@ -117,7 +131,7 @@ function validateTrip(body) {
       title: str(d, "title", 100),
       spots: spots.map((s) => {
         if (!isObj(s)) throw new HttpError(400, "each spot must be an object");
-        return { name: str(s, "name", 100), note: str(s, "note", 500) };
+        return { name: str(s, "name", 100), note: str(s, "note", 500), ...coords(s) };
       }),
     };
   });
@@ -157,10 +171,10 @@ const SAMPLE_TRIPS = [
     tips: "清水寺和伏见稻荷尽量早上 8 点前到，人少光线好；寺院多在 17 点前关门；随身带现金，小店常不支持刷卡。",
     days: [
       { title: "第一天 东山古寺巡礼", spots: [
-        { name: "清水寺", note: "早起避开人潮，舞台上看京都全景" },
-        { name: "二年坂·三年坂", note: "沿途买抹茶冰淇淋和八桥" },
-        { name: "八坂神社", note: "傍晚点灯后很有氛围" },
-        { name: "祇园花见小路", note: "运气好能遇见艺伎" } ] },
+        { name: "清水寺", note: "早起避开人潮，舞台上看京都全景", lat: 34.9949, lng: 135.7850 },
+        { name: "二年坂·三年坂", note: "沿途买抹茶冰淇淋和八桥", lat: 34.9980, lng: 135.7810 },
+        { name: "八坂神社", note: "傍晚点灯后很有氛围", lat: 35.0036, lng: 135.7785 },
+        { name: "祇园花见小路", note: "运气好能遇见艺伎", lat: 35.0027, lng: 135.7750 } ] },
       { title: "第二天 千本鸟居与锦市场", spots: [
         { name: "伏见稻荷大社", note: "爬到四辻看风景，来回约 2 小时" },
         { name: "锦市场", note: "边走边吃，玉子烧和豆乳甜甜圈推荐" },
@@ -373,7 +387,14 @@ function createServer(dbPath) {
       transport: row.transport,
       lodging: row.lodging,
       tips: row.tips,
-      days: JSON.parse(row.days_json),
+      days: JSON.parse(row.days_json).map((d) => ({
+        ...d,
+        spots: (d.spots || []).map((s) => ({
+          ...s,
+          lat: typeof s.lat === "number" ? s.lat : null,
+          lng: typeof s.lng === "number" ? s.lng : null,
+        })),
+      })),
       budget: JSON.parse(row.budget_json),
       photoIds: q.tripPhotoIds.all(row.id).map((r) => Number(r.id)),
       createdAt: row.created_at,

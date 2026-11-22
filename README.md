@@ -20,8 +20,8 @@ JSON / UTF-8，错误统一为 `{"error":"message"}`：400 参数无效，403 �
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/trips?q=&page=` | 最新优先，每页 12 条；`q` 模糊匹配标题/目的地/作者。返回 `{trips:[{id,title,destination,author,summary,dayCount,budgetTotal,coverPhotoId,createdAt}],page,hasMore}` |
-| GET | `/api/trips/:id` | `{id,title,destination,author,summary,transport,lodging,tips,days:[{title,spots:[{name,note}]}],budget:[{label,amount}],photoIds,createdAt,updatedAt}`（不含编辑密钥） |
-| POST | `/api/trips` | 请求体 `{title,destination,author,summary,transport,lodging,tips,days,budget,photoIds}`；`title` 必填（≤100），最多 60 天、每天 30 个景点、50 条预算、20 张照片，`amount` 为非负数。返回 201 与完整行程及 `editKey`（仅此一次） |
+| GET | `/api/trips/:id` | `{id,title,destination,author,summary,transport,lodging,tips,days:[{title,spots:[{name,note,lat,lng}]}],budget:[{label,amount}],photoIds,createdAt,updatedAt}`（不含编辑密钥） |
+| POST | `/api/trips` | 请求体 `{title,destination,author,summary,transport,lodging,tips,days,budget,photoIds}`；`title` 必填（≤100），最多 60 天、每天 30 个景点、50 条预算、20 张照片，`amount` 为非负数。景点可选带位置 `lat`（-90..90）、`lng`（-180..180），须同时给出数字或同时缺省/为 null（否则 400）；无位置时读回为 null；`spots` 数组顺序即游览顺序和路线顺序。返回 201 与完整行程及 `editKey`（仅此一次） |
 | PUT | `/api/trips/:id` | 同上请求体，需请求头 `X-Edit-Key`，否则 403；返回完整行程 |
 | DELETE | `/api/trips/:id` | 需 `X-Edit-Key`；同时删除其照片；返回 `{ok:true}` |
 | POST | `/api/photos` | 请求体为图片原始字节，`Content-Type` 为 `image/jpeg`、`image/png` 或 `image/webp`，最大 3 MB（类型错误 400，过大 413）。返回 201 `{id}` |
