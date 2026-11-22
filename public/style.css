@@ -110,3 +110,25 @@ table.budget{width:100%;border-collapse:collapse}
   .paper{padding:1.6rem 1.8rem}
   .hero h1{font-size:2.1rem}
 }
+
+/* ---------- 地图 / 选点 / 排序 ---------- */
+.spot-no{display:inline-flex;align-items:center;justify-content:center;min-width:1.5rem;height:1.5rem;padding:0 .3rem;margin-right:.4rem;border-radius:999px;background:var(--terra);color:#fff;font-size:.85rem;font-weight:bold;line-height:1;vertical-align:middle}
+.spot.numbered b::before{content:none}
+.spotform .side{flex:none;display:flex;flex-direction:column;align-items:center;gap:.3rem}
+.spotform .side .spot-no{margin:0}
+.mv{width:44px;height:36px;border-radius:10px;border:2px dashed var(--kraft);background:#fff;color:var(--kraft-d);font:inherit;font-size:1.1rem;cursor:pointer;padding:0}
+.mv[disabled]{opacity:.35;cursor:default}
+.pos-line{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem}
+.pos-ok{color:var(--kraft-d);font-size:.9rem}
+.btn.small-btn{min-height:40px;padding:.15rem .8rem;font-size:.92rem}
+.picker{position:fixed;inset:0;z-index:90;background:rgba(40,28,16,.6);display:flex;align-items:center;justify-content:center;padding:.6rem}
+.picker-card{width:100%;max-width:640px;max-height:100%;overflow:auto;background:var(--card);border:2px dashed var(--kraft);border-radius:16px;box-shadow:var(--shadow);padding:.9rem}
+.picker-card h3{margin-bottom:.2rem}
+.picker-map,.route-map{width:100%;height:340px;border-radius:14px;border:3px solid #fff;outline:2px dashed var(--kraft);outline-offset:2px;background:var(--paper2);box-shadow:var(--shadow);position:relative;z-index:0}
+.picker-map{height:min(52vh,360px)}
+.map-fallback{padding:1.5rem 1rem;text-align:center;color:var(--muted);border:2px dashed var(--line);border-radius:14px;background:var(--paper2)}
+.map-legend{display:flex;flex-wrap:wrap;gap:.8rem;margin-top:.8rem;font-size:.92rem;color:var(--muted)}
+.map-legend i{display:inline-block;width:.9rem;height:.9rem;border-radius:50%;margin-right:.3rem;vertical-align:-1px}
+.num-pin span{display:flex;width:28px;height:28px;align-items:center;justify-content:center;border-radius:50%;border:2px solid #fff;color:#fff;font:bold 13px/1 var(--font);box-shadow:0 1px 4px rgba(0,0,0,.4)}
+.leaflet-container{font-family:var(--font)}
+@media(max-width:480px){.route-map{height:300px}}
