@@ -42,6 +42,145 @@
     toast.timer = setTimeout(function () { t.hidden = true; }, 2800);
   }
 
+  // ---------- maps ----------
+  var activeMaps = [];
+  var closePicker = null;
+  var DAY_COLORS = ['#d0694a', '#3f7f93', '#c99a1f', '#6b8e4e', '#8e5a9b', '#b4533a', '#4a6fa5'];
+  var DEFAULT_VIEW = { center: [34.5, 104], zoom: 4 };
+  function hasLeaflet() { return typeof window.L !== 'undefined' && window.L && typeof window.L.map === 'function'; }
+  function destroyMaps() {
+    if (closePicker) { try { closePicker(); } catch (e) { /* ignore */ } closePicker = null; }
+    activeMaps.forEach(function (m) { try { m.remove(); } catch (e) { /* ignore */ } });
+    activeMaps = [];
+  }
+  function validPos(s) {
+    return !!s && typeof s.lat === 'number' && typeof s.lng === 'number' && isFinite(s.lat) && isFinite(s.lng) &&
+      Math.abs(s.lat) <= 90 && Math.abs(s.lng) <= 180;
+  }
+  function fmtPos(lat, lng) { return lat.toFixed(4) + ', ' + lng.toFixed(4); }
+  function newMap(el, center, zoom) {
+    var map = window.L.map(el, { scrollWheelZoom: false }).setView(center, zoom);
+    window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; OpenStreetMap 贡献者'
+    }).addTo(map);
+    activeMaps.push(map);
+    return map;
+  }
+  function mapFallback() {
+    return h('div', { class: 'map-fallback', text: '🗺 地图暂时加载不了（可能是网络问题），不影响其他内容，稍后刷新页面再试试吧。' });
+  }
+
+  // 地图选点面板：initial 为 {lat,lng} 或 null；确认时回调 onConfirm(lat, lng)
+  function openPicker(initial, view, onConfirm) {
+    if (closePicker) closePicker();
+    var body = h('div', { class: 'picker-map' });
+    var chosen = initial ? { lat: initial.lat, lng: initial.lng } : null;
+    var map = null, marker = null;
+    var overlay = h('div', { class: 'picker', role: 'dialog', 'aria-modal': 'true', 'aria-label': '选择位置' });
+    var okBtn = h('button', { class: 'btn primary', type: 'button', text: '确认位置', disabled: !chosen });
+    function shut() {
+      if (map) {
+        var i = activeMaps.indexOf(map);
+        if (i >= 0) activeMaps.splice(i, 1);
+        try { map.remove(); } catch (e) { /* ignore */ }
+        map = null;
+      }
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      if (closePicker === shut) closePicker = null;
+    }
+    function setPoint(lat, lng) {
+      chosen = { lat: lat, lng: lng };
+      okBtn.disabled = false;
+      if (!marker) {
+        marker = window.L.marker([lat, lng], { draggable: true }).addTo(map);
+        marker.on('dragend', function () { var p = marker.getLatLng(); chosen = { lat: p.lat, lng: p.lng }; });
+      } else marker.setLatLng([lat, lng]);
+    }
+    var locBtn = h('button', { class: 'btn', type: 'button', text: '📍 定位到我的位置', onclick: function () {
+      if (!navigator.geolocation) return toast('当前浏览器不支持定位');
+      locBtn.disabled = true;
+      navigator.geolocation.getCurrentPosition(function (pos) {
+        locBtn.disabled = false;
+        if (!map) return;
+        setPoint(pos.coords.latitude, pos.coords.longitude);
+        map.setView([pos.coords.latitude, pos.coords.longitude], 15);
+      }, function (err) {
+        locBtn.disabled = false;
+        toast(err && err.code === 1 ? '定位被拒绝了，请在浏览器里允许定位，或直接在地图上点选' : '获取位置失败，请直接在地图上点选');
+      }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+    } });
+    okBtn.addEventListener('click', function () { if (chosen) { onConfirm(chosen.lat, chosen.lng); shut(); } });
+    overlay.appendChild(h('div', { class: 'picker-card' },
+      h('h3', { text: '📍 选择位置' }),
+      h('p', { class: 'hint', text: '点击地图放置标记，可拖动标记微调位置。' }),
+      body,
+      h('div', { class: 'actions' }, locBtn, okBtn, h('button', { class: 'btn', type: 'button', text: '取消', onclick: shut }))));
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) shut(); });
+    document.body.appendChild(overlay);
+    closePicker = shut;
+    if (!hasLeaflet()) {
+      body.appendChild(mapFallback());
+      locBtn.disabled = true;
+      return;
+    }
+    try {
+      map = newMap(body, chosen ? [chosen.lat, chosen.lng] : view.center, chosen ? 14 : view.zoom);
+      map.on('click', function (e) { setPoint(e.latlng.lat, e.latlng.lng); });
+      if (chosen) setPoint(chosen.lat, chosen.lng);
+      setTimeout(function () { if (map) map.invalidateSize(); }, 50);
+    } catch (e) {
+      clear(body);
+      body.appendChild(mapFallback());
+      locBtn.disabled = true;
+    }
+  }
+
+  function routeMap(days) {
+    var box = h('div', { class: 'route-map' });
+    var legend = h('div', { class: 'map-legend' });
+    var wrap = h('div', {}, box, legend);
+    if (!hasLeaflet()) { clear(wrap); wrap.appendChild(mapFallback()); return wrap; }
+    // 地图需要先挂到页面上才能量尺寸，所以延后初始化
+    setTimeout(function () {
+      if (!box.isConnected) return;
+      try {
+        var map = newMap(box, DEFAULT_VIEW.center, DEFAULT_VIEW.zoom);
+        var all = [], seq = [], n = 0;
+        days.forEach(function (d, di) {
+          var color = DAY_COLORS[di % DAY_COLORS.length];
+          var pts = [];
+          (d.spots || []).forEach(function (s) {
+            if (!validPos(s)) return;
+            n++;
+            var pt = [s.lat, s.lng];
+            pts.push(pt); all.push(pt);
+            var pin = h('span', { text: String(n) });
+            pin.style.background = color;
+            var icon = window.L.divIcon({ className: 'num-pin', iconSize: [28, 28], iconAnchor: [14, 14], html: pin });
+            window.L.marker(pt, { icon: icon }).addTo(map).bindPopup(h('div', { text: n + '. ' + s.name }));
+          });
+          seq = seq.concat(pts);
+          if (pts.length > 1) window.L.polyline(pts, { color: color, weight: 4, opacity: 0.85 }).addTo(map);
+          if (days.length > 1 && pts.length) {
+            var sw = h('i');
+            sw.style.background = color;
+            legend.appendChild(h('span', { class: 'lg' }, sw, '第 ' + (di + 1) + ' 天'));
+          }
+        });
+        // 跨天的淡色虚线，保证整条路线按顺序连起来
+        if (days.length > 1 && seq.length > 1) {
+          window.L.polyline(seq, { color: '#8a6238', weight: 2, opacity: 0.4, dashArray: '4 8' }).addTo(map).bringToBack();
+        }
+        if (all.length === 1) map.setView(all[0], 14);
+        else map.fitBounds(window.L.latLngBounds(all), { padding: [30, 30] });
+      } catch (e) {
+        clear(wrap);
+        wrap.appendChild(mapFallback());
+      }
+    }, 0);
+    return wrap;
+  }
+
   function getKeys() {
     try { return JSON.parse(localStorage.getItem(KEYS_STORE)) || {}; } catch (e) { return {}; }
   }
@@ -191,17 +330,20 @@
       app.appendChild(hero);
 
       var days = t.days || [];
+      var spotNo = 0;
+      days.forEach(function (d) { (d.spots || []).forEach(function (s) { if (validPos(s)) s._no = ++spotNo; }); });
       if (days.length) {
         var wrap = h('div');
         days.forEach(function (d, i) {
           var box = h('div', { class: 'day' }, h('h3', {}, h('span', { class: 'day-no', text: '第 ' + (i + 1) + ' 天' }), h('span', { text: d.title || '' })));
           (d.spots || []).forEach(function (s) {
-            box.appendChild(h('div', { class: 'spot' }, h('b', { text: s.name }), s.note ? h('div', { class: 'note', text: s.note }) : null));
+            box.appendChild(h('div', { class: s._no ? 'spot numbered' : 'spot' }, s._no ? h('span', { class: 'spot-no', text: String(s._no) }) : null, h('b', { text: s.name }), s.note ? h('div', { class: 'note', text: s.note }) : null));
           });
           wrap.appendChild(box);
         });
         app.appendChild(section('每日行程', wrap));
       }
+      if (spotNo > 0) app.appendChild(section('🗺 路线图', routeMap(days)));
 
       var photos = t.photoIds || [];
       if (photos.length) {
@@ -337,13 +479,52 @@
 
     // days
     var daysBox = h('div');
+    function renumberSpots(spotsBox) {
+      var rows = spotsBox.children;
+      Array.prototype.forEach.call(rows, function (r, i) {
+        r._no.textContent = String(i + 1);
+        r._up.disabled = i === 0;
+        r._down.disabled = i === rows.length - 1;
+      });
+    }
+    function pickerView() {
+      var last = null;
+      Array.prototype.forEach.call(daysBox.querySelectorAll('.spotform'), function (r) { if (r._pos) last = r._pos; });
+      return last ? { center: [last.lat, last.lng], zoom: 10 } : DEFAULT_VIEW;
+    }
     function addSpot(spotsBox, s) {
       var name = h('input', { type: 'text', placeholder: '景点 / 地点名称', value: s ? s.name : '', 'data-f': 'spot-name' });
       var note = h('textarea', { placeholder: '这里的小记录（选填）', 'data-f': 'spot-note', style: 'min-height:60px' });
       note.value = s ? (s.note || '') : '';
-      var row = h('div', { class: 'spotform' }, h('div', { class: 'fields' }, name, note),
-        h('button', { class: 'x', type: 'button', 'aria-label': '删除景点', text: '✕', onclick: function () { spotsBox.removeChild(row); } }));
+      var posBox = h('div', { class: 'pos-line' });
+      var no = h('span', { class: 'spot-no', 'aria-hidden': 'true' });
+      var up = h('button', { class: 'mv', type: 'button', 'aria-label': '上移景点', text: '↑' });
+      var down = h('button', { class: 'mv', type: 'button', 'aria-label': '下移景点', text: '↓' });
+      var row = h('div', { class: 'spotform' }, h('div', { class: 'fields' }, name, note, posBox),
+        h('div', { class: 'side' }, no, up, down,
+          h('button', { class: 'x', type: 'button', 'aria-label': '删除景点', text: '✕', onclick: function () { spotsBox.removeChild(row); renumberSpots(spotsBox); } })));
+      row._pos = validPos(s) ? { lat: s.lat, lng: s.lng } : null;
+      row._no = no; row._up = up; row._down = down;
+      function drawPos() {
+        clear(posBox);
+        var pickBtn = h('button', { class: 'btn small-btn', type: 'button', text: row._pos ? '📍 重新选择' : '📍 选择位置', onclick: function () {
+          openPicker(row._pos, pickerView(), function (lat, lng) { row._pos = { lat: lat, lng: lng }; drawPos(); });
+        } });
+        if (row._pos) {
+          posBox.appendChild(h('span', { class: 'pos-ok', text: '✓ 已选位置 ' + fmtPos(row._pos.lat, row._pos.lng) }));
+          posBox.appendChild(pickBtn);
+          posBox.appendChild(h('button', { class: 'btn small-btn', type: 'button', text: '清除位置', onclick: function () { row._pos = null; drawPos(); } }));
+        } else posBox.appendChild(pickBtn);
+      }
+      drawPos();
+      up.addEventListener('click', function () {
+        if (row.previousElementSibling) { spotsBox.insertBefore(row, row.previousElementSibling); renumberSpots(spotsBox); }
+      });
+      down.addEventListener('click', function () {
+        if (row.nextElementSibling) { spotsBox.insertBefore(row.nextElementSibling, row); renumberSpots(spotsBox); }
+      });
       spotsBox.appendChild(row);
+      renumberSpots(spotsBox);
     }
     function addDay(d) {
       var title = h('input', { type: 'text', placeholder: '这一天的主题，例如：古城慢游', value: d ? d.title : '', 'data-f': 'day-title' });
@@ -436,7 +617,10 @@
         Array.prototype.forEach.call(box._spots.children, function (sp) {
           var nm = sp.querySelector('[data-f="spot-name"]').value.trim();
           var nt = sp.querySelector('[data-f="spot-note"]').value.trim();
-          if (nm) spots.push({ name: nm, note: nt });
+          if (!nm) return;
+          var spot = { name: nm, note: nt };
+          if (sp._pos) { spot.lat = sp._pos.lat; spot.lng = sp._pos.lng; }
+          spots.push(spot);
         });
         var dt = box._title.value.trim();
         if (dt || spots.length) days.push({ title: dt, spots: spots });
@@ -492,6 +676,7 @@
   // ---------- router ----------
   function route() {
     closeLightbox();
+    destroyMaps();
     var hash = location.hash || '#/';
     var m;
     window.scrollTo(0, 0);
