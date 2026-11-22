@@ -4,7 +4,9 @@
   var app = document.getElementById('app');
   var MAX_BYTES = 3 * 1024 * 1024;
   var KEYS_STORE = 'tripEditKeys';
-  var AUTHOR_STORE = 'tripAuthorName';
+  var TOKEN_STORE = 'pm_token';
+  var USER_STORE = 'pm_user';
+  var returnTo = null; // 登录/注册成功后要回到的页面
 
   // ---------- helpers ----------
   function h(tag, attrs) {
@@ -194,27 +196,116 @@
     delete k[id];
     try { localStorage.setItem(KEYS_STORE, JSON.stringify(k)); } catch (e) { /* ignore */ }
   }
-  function getAuthor() {
-    try { return localStorage.getItem(AUTHOR_STORE) || ''; } catch (e) { return ''; }
+  // ---------- auth ----------
+  function getToken() {
+    try { return localStorage.getItem(TOKEN_STORE) || ''; } catch (e) { return ''; }
   }
-  function setAuthor(name) {
-    try { localStorage.setItem(AUTHOR_STORE, name); } catch (e) { /* ignore */ }
+  function getUser() {
+    if (!getToken()) return null;
+    try { return JSON.parse(localStorage.getItem(USER_STORE)) || null; } catch (e) { return null; }
+  }
+  function setAuth(token, user) {
+    try {
+      localStorage.setItem(TOKEN_STORE, token);
+      localStorage.setItem(USER_STORE, JSON.stringify(user));
+    } catch (e) { /* ignore */ }
+    renderNav();
+  }
+  function clearAuth() {
+    try { localStorage.removeItem(TOKEN_STORE); localStorage.removeItem(USER_STORE); } catch (e) { /* ignore */ }
+    renderNav();
+  }
+  function goLogin(back) {
+    returnTo = back || location.hash || '#/';
+    location.hash = '#/login';
+  }
+  function renderNav() {
+    var nav = document.getElementById('nav-auth');
+    if (!nav) return;
+    clear(nav);
+    var u = getUser();
+    if (u) {
+      nav.appendChild(h('span', { class: 'nav-user', text: '👤 ' + (u.displayName || u.email) }));
+      nav.appendChild(h('button', { class: 'btn small', type: 'button', text: '退出', onclick: doLogout }));
+    } else {
+      nav.appendChild(h('a', { class: 'btn small', href: '#/login', text: '登录' }));
+      nav.appendChild(h('a', { class: 'btn small', href: '#/register', text: '注册' }));
+    }
+  }
+  function doLogout() {
+    var done = function () { clearAuth(); toast('已退出登录'); route(); };
+    api('/api/auth/logout', { method: 'POST' }).then(done, done);
   }
 
   function api(path, opts) {
     opts = opts || {};
+    var token = getToken();
+    if (token) {
+      opts.headers = Object.assign({}, opts.headers, { Authorization: 'Bearer ' + token });
+    }
     return fetch(path, opts).then(function (res) {
       return res.text().then(function (text) {
         var data = null;
         try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
         if (!res.ok) {
-          throw new Error((data && data.error) || '请求失败（' + res.status + '）');
+          var err = new Error((data && data.error) || '请求失败（' + res.status + '）');
+          err.status = res.status;
+          throw err;
         }
         return data;
       });
     }, function () {
       throw new Error('网络好像开小差了，请检查网络后再试');
     });
+  }
+
+  // 登录 / 注册页
+  function renderAuth(mode) {
+    clear(app);
+    if (getUser()) { var back = returnTo || '#/'; returnTo = null; location.hash = back; return; }
+    var reg = mode === 'register';
+    var fName = h('input', { type: 'text', maxlength: '50', placeholder: '大家看到的名字', autocomplete: 'nickname' });
+    var fEmail = h('input', { type: 'email', placeholder: 'you@example.com', autocomplete: 'email' });
+    var fPass = h('input', { type: 'password', placeholder: reg ? '至少 8 位' : '你的密码', autocomplete: reg ? 'new-password' : 'current-password' });
+    var errBox = h('div');
+    var submit = h('button', { class: 'btn primary', type: 'submit', text: reg ? '注册' : '登录' });
+    function field(label, el, hint) { return h('div', {}, h('label', { text: label }), el, hint ? h('p', { class: 'hint', text: hint }) : null); }
+    var form = h('form', { novalidate: true, onsubmit: function (e) {
+      e.preventDefault();
+      clear(errBox);
+      function fail(msg) { errBox.appendChild(h('div', { class: 'err', text: msg })); }
+      var name = fName.value.trim(), email = fEmail.value.trim(), pass = fPass.value;
+      if (reg && !name) return fail('请填写昵称。');
+      if (!email) return fail('请填写邮箱。');
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail('邮箱格式不太对，请检查一下。');
+      if (!pass) return fail('请填写密码。');
+      if (reg && pass.length < 8) return fail('密码至少需要 8 位。');
+      submit.disabled = true;
+      var body = reg ? { email: email, password: pass, displayName: name } : { email: email, password: pass };
+      api(reg ? '/api/auth/register' : '/api/auth/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      }).then(function (res) {
+        setAuth(res.token, res.user);
+        toast(reg ? '注册成功，欢迎你 ✿' : '登录成功 ✓');
+        var dest = returnTo || '#/';
+        returnTo = null;
+        location.hash = dest;
+      }, function (err) {
+        submit.disabled = false;
+        if (err.status === 401) fail('邮箱或密码不对');
+        else if (err.status === 409) fail('这个邮箱已经注册过了');
+        else fail(err.message);
+      });
+    } },
+      h('section', { class: 'paper' }, h('h2', { text: reg ? '注册账号' : '登录' }),
+        reg ? field('昵称', fName) : null,
+        field('邮箱', fEmail),
+        field('密码', fPass, reg ? '密码至少 8 位。' : null),
+        errBox,
+        h('div', { class: 'actions' }, submit),
+        h('p', { class: 'hint' }, reg ? '已有账号？' : '还没有账号？',
+          h('a', { href: reg ? '#/login' : '#/register', text: reg ? '去登录' : '去注册' }))));
+    app.appendChild(form);
   }
 
   function stateBox(icon, msg, extra) {
@@ -312,7 +403,9 @@
     app.appendChild(loadingBox());
     api('/api/trips/' + encodeURIComponent(id)).then(function (t) {
       clear(app);
+      var me = getUser();
       var key = getKeys()[t.id];
+      var canEdit = t.userId ? !!(me && me.id === t.userId) : !!key;
       var hero = h('section', { class: 'paper hero' },
         h('h1', { text: t.title }),
         h('div', { class: 'meta' },
@@ -321,10 +414,10 @@
           h('span', { class: 'tag', text: ((t.days || []).length) + ' 天' }),
           t.createdAt ? h('span', { class: 'tag', text: '🗓 ' + String(t.createdAt).slice(0, 10) }) : null),
         t.summary ? h('p', { class: 'summary', text: t.summary }) : null);
-      if (key) {
+      if (canEdit) {
         hero.appendChild(h('div', { class: 'actions' },
           h('a', { class: 'btn primary', href: '#/edit/' + encodeURIComponent(t.id), text: '✎ 编辑' }),
-          h('button', { class: 'btn danger', type: 'button', text: '🗑 删除', onclick: function (e) { doDelete(t, key, e.currentTarget); } })));
+          h('button', { class: 'btn danger', type: 'button', text: '🗑 删除', onclick: function (e) { doDelete(t, e.currentTarget); } })));
       }
       app.appendChild(h('a', { href: '#/', text: '← 返回首页' }));
       app.appendChild(hero);
@@ -376,16 +469,24 @@
     });
   }
 
-  function doDelete(t, key, btn) {
+  function authFail(err) {
+    if (err.status === 401) { toast('请先登录'); goLogin(location.hash); return true; }
+    if (err.status === 403) { toast('只有作者本人可以修改'); return true; }
+    return false;
+  }
+
+  function doDelete(t, btn) {
     if (!window.confirm('确定要删除「' + t.title + '」吗？删除后无法恢复哦。')) return;
     btn.disabled = true;
-    api('/api/trips/' + encodeURIComponent(t.id), { method: 'DELETE', headers: { 'X-Edit-Key': key } }).then(function () {
-      removeKey(t.id);
+    var opts = { method: 'DELETE' };
+    if (!t.userId) opts.headers = { 'X-Edit-Key': getKeys()[t.id] || '' };
+    api('/api/trips/' + encodeURIComponent(t.id), opts).then(function () {
+      if (!t.userId) removeKey(t.id);
       toast('已删除');
       location.hash = '#/';
     }, function (err) {
       btn.disabled = false;
-      toast(err.message);
+      if (!authFail(err)) toast(err.message);
     });
   }
 
@@ -442,14 +543,21 @@
   // ---------- form ----------
   function renderForm(id) {
     clear(app);
+    // 有本机旧编辑密钥的旧行程可不登录编辑，其余都需要先登录
+    if (!getUser() && !(id && getKeys()[id])) return goLogin(location.hash);
     if (id) {
-      if (!getKeys()[id]) {
-        app.appendChild(stateBox('🔒', '只有发布者本人（在发布时用的这台设备上）才能编辑这篇行程。',
-          h('a', { class: 'btn', href: '#/trip/' + encodeURIComponent(id), text: '← 返回行程' })));
-        return;
-      }
       app.appendChild(loadingBox());
-      api('/api/trips/' + encodeURIComponent(id)).then(function (t) { buildForm(t); }, function (err) {
+      api('/api/trips/' + encodeURIComponent(id)).then(function (t) {
+        var me = getUser();
+        var ok = t.userId ? !!(me && me.id === t.userId) : !!getKeys()[t.id];
+        if (!ok) {
+          clear(app);
+          app.appendChild(stateBox('🔒', '只有作者本人才能编辑这篇行程。',
+            h('a', { class: 'btn', href: '#/trip/' + encodeURIComponent(id), text: '← 返回行程' })));
+          return;
+        }
+        buildForm(t);
+      }, function (err) {
         clear(app);
         app.appendChild(errorBox(err, function () { renderForm(id); }));
       });
@@ -465,7 +573,6 @@
 
     var fTitle = h('input', { type: 'text', maxlength: '100', placeholder: '例如：三天两夜漫游京都', value: trip ? trip.title : '' });
     var fDest = h('input', { type: 'text', maxlength: '100', placeholder: '例如：日本 · 京都', value: trip ? trip.destination : '' });
-    var fAuthor = h('input', { type: 'text', maxlength: '50', placeholder: '你的名字或昵称', value: trip ? trip.author : getAuthor() });
     var fSummary = h('textarea', { placeholder: '用几句话介绍这次旅行…' });
     fSummary.value = trip ? (trip.summary || '') : '';
     var fTransport = h('textarea', { placeholder: '怎么去、怎么玩：飞机、地铁、打车…' });
@@ -607,10 +714,9 @@
       clear(errBox);
       function fail(msg) { errBox.appendChild(h('div', { class: 'err', text: msg })); errBox.scrollIntoView({ block: 'center' }); }
       if (uploading) return fail('照片还在上传中，请稍等一下。');
-      var title = fTitle.value.trim(), dest = fDest.value.trim(), author = fAuthor.value.trim();
+      var title = fTitle.value.trim(), dest = fDest.value.trim();
       if (!title) return fail('请填写行程标题。');
       if (!dest) return fail('请填写目的地。');
-      if (!author) return fail('请填写作者名称。');
       var days = [];
       Array.prototype.forEach.call(daysBox.children, function (box) {
         var spots = [];
@@ -637,27 +743,25 @@
       });
       if (bad) return fail('预算每一行都需要填写项目名称和有效金额（或把空行删除）。');
       var body = {
-        title: title, destination: dest, author: author,
+        title: title, destination: dest,
         summary: fSummary.value.trim(), transport: fTransport.value.trim(),
         lodging: fLodging.value.trim(), tips: fTips.value.trim(),
         days: days, budget: budget, photoIds: photoIds.slice()
       };
       submit.disabled = true;
       var opts = { method: editing ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
-      if (editing) opts.headers['X-Edit-Key'] = getKeys()[trip.id];
+      if (editing && !trip.userId) opts.headers['X-Edit-Key'] = getKeys()[trip.id];
       api(editing ? '/api/trips/' + encodeURIComponent(trip.id) : '/api/trips', opts).then(function (res) {
-        setAuthor(author);
         var tid = editing ? trip.id : res.id;
-        if (!editing && res.editKey) saveKey(res.id, res.editKey);
         toast(editing ? '修改已保存 ✓' : '发布成功 ✓');
         location.hash = '#/trip/' + encodeURIComponent(tid);
       }, function (err) {
         submit.disabled = false;
-        fail(err.message);
+        if (!authFail(err)) fail(err.message);
       });
     } },
       h('section', { class: 'paper' }, h('h2', { text: '基本信息' }),
-        field('标题', fTitle), field('目的地', fDest), field('作者', fAuthor), field('简介', fSummary)),
+        field('标题', fTitle), field('目的地', fDest),field('简介', fSummary)),
       h('section', { class: 'paper' }, h('h2', { text: '每日行程' }), daysBox,
         h('button', { class: 'btn', type: 'button', text: '＋ 添加一天', onclick: function () { addDay(null); } })),
       h('section', { class: 'paper' }, h('h2', { text: '预算花费' }), budgetBox,
@@ -680,11 +784,22 @@
     var hash = location.hash || '#/';
     var m;
     window.scrollTo(0, 0);
-    if ((m = hash.match(/^#\/trip\/([^/?]+)/))) renderDetail(decodeURIComponent(m[1]));
+    if (hash.indexOf('#/login') === 0) renderAuth('login');
+    else if (hash.indexOf('#/register') === 0) renderAuth('register');
+    else if ((m = hash.match(/^#\/trip\/([^/?]+)/))) renderDetail(decodeURIComponent(m[1]));
     else if ((m = hash.match(/^#\/edit\/([^/?]+)/))) renderForm(decodeURIComponent(m[1]));
     else if (hash.indexOf('#/new') === 0) renderForm(null);
     else renderHome('');
   }
   window.addEventListener('hashchange', route);
-  route();
+  renderNav();
+  if (getToken()) {
+    api('/api/auth/me').then(function (res) {
+      if (res && res.user) setAuth(getToken(), res.user);
+      route();
+    }, function (err) {
+      if (err.status === 401) clearAuth();
+      route();
+    });
+  } else route();
 })();
