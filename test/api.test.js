@@ -76,7 +76,7 @@ test("create, list, get, update, delete", async () => {
   const got = await api("GET", `/api/trips/${id}`);
   assert.equal(got.status, 200);
   assert.equal(got.body.editKey, undefined);
-  assert.deepEqual(got.body.days, sample().days);
+  assert.deepEqual(got.body.days, [{ title: "Day 1", spots: [{ name: "A", note: "n", lat: null, lng: null }] }]);
   assert.deepEqual(got.body.photoIds, []);
 
   const body = { ...sample(), title: "改名后" };
@@ -174,4 +174,51 @@ test("static serving: missing public is 404, traversal blocked", async () => {
   assert.equal(r.status, 404);
   const t = await fetch(base + "/..%2fserver.js");
   assert.equal(t.status, 404);
+});
+
+test("spot coordinates: save, order, update, null, validation", async () => {
+  const body = sample();
+  body.days = [{ title: "D", spots: [
+    { name: "B", note: "", lat: 34.9949, lng: 135.785 },
+    { name: "A", note: "", lat: -33.5, lng: -70.25 },
+    { name: "C", note: "" },
+  ] }];
+  const c = await api("POST", "/api/trips", body);
+  assert.equal(c.status, 201);
+  const g = await api("GET", "/api/trips/" + c.body.id);
+  assert.deepEqual(g.body.days[0].spots.map((s) => [s.name, s.lat, s.lng]), [
+    ["B", 34.9949, 135.785], ["A", -33.5, -70.25], ["C", null, null],
+  ]);
+
+  const upd = sample();
+  upd.days = [{ title: "D", spots: [
+    { name: "C", lat: null, lng: null }, { name: "A", lat: -33.5, lng: -70.25 }, { name: "B", lat: 1, lng: 2 },
+  ] }];
+  const p = await api("PUT", "/api/trips/" + c.body.id, upd, { "X-Edit-Key": c.body.editKey });
+  assert.equal(p.status, 200);
+  const g2 = await api("GET", "/api/trips/" + c.body.id);
+  assert.deepEqual(g2.body.days[0].spots.map((s) => s.name), ["C", "A", "B"]);
+  assert.equal(g2.body.days[0].spots[0].lat, null);
+  assert.equal(g2.body.days[0].spots[2].lng, 2);
+
+  for (const bad of [{ lat: 1 }, { lng: 1 }, { lat: "1", lng: 2 }, { lat: 91, lng: 0 }, { lat: 0, lng: 181 }]) {
+    const b = sample();
+    b.days = [{ title: "D", spots: [{ name: "X", ...bad }] }];
+    const r = await api("POST", "/api/trips", b);
+    assert.equal(r.status, 400);
+    assert.ok(r.body.error);
+  }
+
+  const old = await api("POST", "/api/trips", sample());
+  assert.equal(old.status, 201);
+  assert.equal(old.body.days[0].spots[0].lat, null);
+});
+
+test("legacy stored spots without lat/lng read back as null", async () => {
+  const c = await api("POST", "/api/trips", sample());
+  server.db.prepare("UPDATE trips SET days_json = ? WHERE id = ?")
+    .run(JSON.stringify([{ title: "old", spots: [{ name: "Z", note: "" }] }]), c.body.id);
+  const g = await api("GET", "/api/trips/" + c.body.id);
+  assert.equal(g.body.days[0].spots[0].lat, null);
+  assert.equal(g.body.days[0].spots[0].lng, null);
 });
