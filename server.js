@@ -9,6 +9,9 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const PAGE_SIZE = 12;
 const MAX_PHOTO_BYTES = 3 * 1024 * 1024;
 const MAX_JSON_BYTES = 1024 * 1024;
+const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
+const AUTH_LIMIT = 20;
+const AUTH_WINDOW_MS = 60 * 1000;
 const PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -70,10 +73,36 @@ function openDatabase(dbPath) {
     );
     CREATE INDEX IF NOT EXISTS idx_photos_trip ON photos(trip_id);
     CREATE INDEX IF NOT EXISTS idx_trips_created ON trips(created_at, id);
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      salt TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+      token_hash TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
   `);
-  // Later schema changes: add guarded ALTER TABLE steps keyed on user_version.
+  // Later schema changes: guarded ALTER TABLE steps keyed on user_version.
   const version = db.prepare("PRAGMA user_version").get().user_version;
   if (version < 1) db.exec("PRAGMA user_version = 1");
+  if (version < 2) {
+    db.exec("BEGIN");
+    try {
+      db.exec("ALTER TABLE trips ADD COLUMN user_id INTEGER REFERENCES users(id)");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_trips_user ON trips(user_id)");
+      db.exec("PRAGMA user_version = 2");
+      db.exec("COMMIT");
+    } catch (e) {
+      db.exec("ROLLBACK");
+      throw e;
+    }
+  }
   return db;
 }
 
@@ -112,7 +141,6 @@ function validateTrip(body) {
   const trip = {
     title: str(body, "title", 100, true),
     destination: str(body, "destination", 100),
-    author: str(body, "author", 50),
     summary: str(body, "summary", 1000),
     transport: str(body, "transport", 2000),
     lodging: str(body, "lodging", 2000),
@@ -341,6 +369,18 @@ function keyMatches(stored, given) {
   return crypto.timingSafeEqual(a, b);
 }
 
+function hashPassword(password, salt) {
+  return crypto.scryptSync(password, salt, 64).toString("hex");
+}
+
+function sha256Hex(s) {
+  return crypto.createHash("sha256").update(s).digest("hex");
+}
+
+function publicUser(u) {
+  return { id: Number(u.id), email: u.email, displayName: u.display_name };
+}
+
 /* ---------- server ---------- */
 
 function createServer(dbPath) {
@@ -350,14 +390,30 @@ function createServer(dbPath) {
   const q = {
     insertTrip: db.prepare(
       `INSERT INTO trips (title, destination, author, summary, transport, lodging, tips,
-         days_json, budget_json, edit_key, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         days_json, budget_json, edit_key, created_at, updated_at, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ),
     updateTrip: db.prepare(
-      `UPDATE trips SET title = ?, destination = ?, author = ?, summary = ?, transport = ?,
+      `UPDATE trips SET title = ?, destination = ?, summary = ?, transport = ?,
          lodging = ?, tips = ?, days_json = ?, budget_json = ?, updated_at = ? WHERE id = ?`
     ),
-    getTrip: db.prepare("SELECT * FROM trips WHERE id = ?"),
+    getTrip: db.prepare(
+      `SELECT t.*, u.display_name AS user_name FROM trips t
+       LEFT JOIN users u ON u.id = t.user_id WHERE t.id = ?`
+    ),
+    insertUser: db.prepare(
+      "INSERT INTO users (email, display_name, password_hash, salt, created_at) VALUES (?, ?, ?, ?, ?)"
+    ),
+    userByEmail: db.prepare("SELECT * FROM users WHERE email = ?"),
+    insertSession: db.prepare(
+      "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)"
+    ),
+    sessionUser: db.prepare(
+      `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+       WHERE s.token_hash = ? AND s.expires_at > ?`
+    ),
+    deleteSession: db.prepare("DELETE FROM sessions WHERE token_hash = ?"),
+    purgeSessions: db.prepare("DELETE FROM sessions WHERE expires_at <= ?"),
     deleteTrip: db.prepare("DELETE FROM trips WHERE id = ?"),
     tripPhotoIds: db.prepare("SELECT id FROM photos WHERE trip_id = ? ORDER BY id"),
     detachPhotos: db.prepare("UPDATE photos SET trip_id = NULL WHERE trip_id = ?"),
@@ -369,10 +425,11 @@ function createServer(dbPath) {
     getPhoto: db.prepare("SELECT mime, data FROM photos WHERE id = ?"),
     list: db.prepare(
       `SELECT t.id, t.title, t.destination, t.author, t.summary, t.days_json, t.budget_json,
-         t.created_at, (SELECT MIN(p.id) FROM photos p WHERE p.trip_id = t.id) AS cover
-       FROM trips t
+         t.created_at, t.user_id, u.display_name AS user_name,
+         (SELECT MIN(p.id) FROM photos p WHERE p.trip_id = t.id) AS cover
+       FROM trips t LEFT JOIN users u ON u.id = t.user_id
        WHERE (? = '' OR t.title LIKE ? ESCAPE '\\' OR t.destination LIKE ? ESCAPE '\\'
-              OR t.author LIKE ? ESCAPE '\\')
+              OR t.author LIKE ? ESCAPE '\\' OR u.display_name LIKE ? ESCAPE '\\')
        ORDER BY t.created_at DESC, t.id DESC LIMIT ? OFFSET ?`
     ),
   };
@@ -382,7 +439,8 @@ function createServer(dbPath) {
       id: row.id,
       title: row.title,
       destination: row.destination,
-      author: row.author,
+      author: row.user_name ?? row.author,
+      userId: row.user_id === null ? null : Number(row.user_id),
       summary: row.summary,
       transport: row.transport,
       lodging: row.lodging,
@@ -427,14 +485,15 @@ function createServer(dbPath) {
     let page = parseInt(url.searchParams.get("page") || "1", 10);
     if (!Number.isFinite(page) || page < 1) page = 1;
     const like = "%" + search.replace(/[\\%_]/g, "\\$&") + "%";
-    const rows = q.list.all(search, like, like, like, PAGE_SIZE + 1, (page - 1) * PAGE_SIZE);
+    const rows = q.list.all(search, like, like, like, like, PAGE_SIZE + 1, (page - 1) * PAGE_SIZE);
     const trips = rows.slice(0, PAGE_SIZE).map((r) => {
       const budget = JSON.parse(r.budget_json);
       return {
         id: r.id,
         title: r.title,
         destination: r.destination,
-        author: r.author,
+        author: r.user_name ?? r.author,
+        userId: r.user_id === null ? null : Number(r.user_id),
         summary: r.summary,
         dayCount: JSON.parse(r.days_json).length,
         budgetTotal: budget.reduce((s, b) => s + b.amount, 0),
@@ -443,6 +502,108 @@ function createServer(dbPath) {
       };
     });
     return { trips, page, hasMore: rows.length > PAGE_SIZE };
+  }
+
+  const authHits = new Map();
+  function rateLimit(req) {
+    const now = Date.now();
+    const ip = req.socket.remoteAddress || "";
+    if (authHits.size > 1000) {
+      for (const [k, v] of authHits) if (now - v.start >= AUTH_WINDOW_MS) authHits.delete(k);
+    }
+    let h = authHits.get(ip);
+    if (!h || now - h.start >= AUTH_WINDOW_MS) {
+      h = { start: now, n: 0 };
+      authHits.set(ip, h);
+    }
+    h.n++;
+    if (h.n > AUTH_LIMIT) {
+      req.resume();
+      throw new HttpError(429, "请求太频繁，请稍后再试");
+    }
+  }
+
+  function bearer(req) {
+    const m = /^Bearer\s+([0-9a-f]{64})$/i.exec(String(req.headers.authorization || "").trim());
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  function currentUser(req) {
+    const token = bearer(req);
+    if (!token) return null;
+    return q.sessionUser.get(sha256Hex(token), new Date().toISOString()) || null;
+  }
+
+  function requireUser(req) {
+    const u = currentUser(req);
+    if (!u) {
+      req.resume();
+      throw new HttpError(401, "请先登录");
+    }
+    return u;
+  }
+
+  function startSession(user) {
+    const token = crypto.randomBytes(32).toString("hex");
+    const now = Date.now();
+    q.purgeSessions.run(new Date(now).toISOString());
+    q.insertSession.run(
+      sha256Hex(token), user.id, new Date(now).toISOString(), new Date(now + SESSION_MS).toISOString()
+    );
+    return { token, user: publicUser(user) };
+  }
+
+  async function handleAuth(req, res, parts) {
+    const action = parts[2];
+    const method = req.method;
+    if (parts.length !== 3) throw new HttpError(404, "not found");
+    if (action === "register") {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      rateLimit(req);
+      const body = await readJson(req);
+      if (!isObj(body)) throw new HttpError(400, "body must be a JSON object");
+      const email = str(body, "email", 120, true).toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, "邮箱格式不正确");
+      const password = body.password;
+      if (typeof password !== "string" || password.length < 8 || password.length > 72) {
+        throw new HttpError(400, "密码需为 8~72 位");
+      }
+      const displayName = str(body, "displayName", 50, true);
+      if (q.userByEmail.get(email)) throw new HttpError(409, "该邮箱已被注册");
+      const salt = crypto.randomBytes(16).toString("hex");
+      try {
+        q.insertUser.run(email, displayName, hashPassword(password, salt), salt, new Date().toISOString());
+      } catch (e) {
+        if (/UNIQUE/i.test(String(e.message))) throw new HttpError(409, "该邮箱已被注册");
+        throw e;
+      }
+      return sendJson(res, 201, startSession(q.userByEmail.get(email)));
+    }
+    if (action === "login") {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      rateLimit(req);
+      const body = await readJson(req);
+      if (!isObj(body)) throw new HttpError(400, "body must be a JSON object");
+      const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+      const password = typeof body.password === "string" ? body.password.slice(0, 200) : "";
+      const user = q.userByEmail.get(email);
+      // Always run scrypt so response time does not reveal whether the email exists.
+      const given = Buffer.from(hashPassword(password, user ? user.salt : "0".repeat(32)), "hex");
+      const stored = Buffer.from(user ? user.password_hash : "0".repeat(128), "hex");
+      if (!user || !crypto.timingSafeEqual(given, stored)) throw new HttpError(401, "邮箱或密码不对");
+      return sendJson(res, 200, startSession(user));
+    }
+    if (action === "me") {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      return sendJson(res, 200, { user: publicUser(requireUser(req)) });
+    }
+    if (action === "logout") {
+      if (method !== "POST") throw new HttpError(405, "method not allowed");
+      requireUser(req);
+      q.deleteSession.run(sha256Hex(bearer(req)));
+      return sendJson(res, 200, { ok: true });
+    }
+    throw new HttpError(404, "not found");
   }
 
   function requireTrip(id) {
@@ -456,22 +617,25 @@ function createServer(dbPath) {
     const method = req.method;
     const resource = parts[1];
 
+    if (resource === "auth") return handleAuth(req, res, parts);
+
     if (resource === "trips" && parts.length === 2) {
       if (method === "GET") return sendJson(res, 200, listTrips(url));
       if (method === "POST") {
+        const user = requireUser(req);
         const t = validateTrip(await readJson(req));
         const key = crypto.randomBytes(16).toString("hex");
         const now = new Date().toISOString();
         const id = tx(() => {
           const r = q.insertTrip.run(
-            t.title, t.destination, t.author, t.summary, t.transport, t.lodging, t.tips,
-            JSON.stringify(t.days), JSON.stringify(t.budget), key, now, now
+            t.title, t.destination, user.display_name, t.summary, t.transport, t.lodging, t.tips,
+            JSON.stringify(t.days), JSON.stringify(t.budget), key, now, now, user.id
           );
           const tid = Number(r.lastInsertRowid);
           attachPhotos(tid, t.photoIds);
           return tid;
         });
-        return sendJson(res, 201, { ...fullTrip(q.getTrip.get(id)), editKey: key });
+        return sendJson(res, 201, fullTrip(q.getTrip.get(id)));
       }
       throw new HttpError(405, "method not allowed");
     }
@@ -481,7 +645,13 @@ function createServer(dbPath) {
       if (method === "GET") return sendJson(res, 200, fullTrip(requireTrip(id)));
       if (method === "PUT" || method === "DELETE") {
         const row = requireTrip(id);
-        if (!keyMatches(row.edit_key, req.headers["x-edit-key"])) {
+        if (row.user_id !== null) {
+          const user = requireUser(req);
+          if (Number(row.user_id) !== Number(user.id)) {
+            req.resume();
+            throw new HttpError(403, "只有作者本人可以修改");
+          }
+        } else if (!keyMatches(row.edit_key, req.headers["x-edit-key"])) {
           req.resume();
           throw new HttpError(403, "wrong edit key");
         }
@@ -495,7 +665,7 @@ function createServer(dbPath) {
         const t = validateTrip(await readJson(req));
         tx(() => {
           q.updateTrip.run(
-            t.title, t.destination, t.author, t.summary, t.transport, t.lodging, t.tips,
+            t.title, t.destination, t.summary, t.transport, t.lodging, t.tips,
             JSON.stringify(t.days), JSON.stringify(t.budget), new Date().toISOString(), id
           );
           attachPhotos(id, t.photoIds);
@@ -506,6 +676,7 @@ function createServer(dbPath) {
     }
 
     if (resource === "photos" && parts.length === 2 && method === "POST") {
+      requireUser(req);
       const mime = String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
       if (!PHOTO_TYPES.includes(mime)) {
         req.resume();
