@@ -1,0 +1,15 @@
+{
+  "name": "pm-4-travel-route-share",
+  "version": "1.0.0",
+  "description": "旅游路线分享 - 行程与照片接口",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
