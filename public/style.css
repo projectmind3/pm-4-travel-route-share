@@ -146,3 +146,20 @@ table.budget{width:100%;border-collapse:collapse}
 .add-spot .actions .btn,.add-spot-pos .btn{min-height:44px}
 .add-spot-pos{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem}
 .add-spot [hidden]{display:none}
+
+/* 节点图片 */
+.spot-photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;margin:.5rem 0 .2rem 1.5rem}
+.spot-photo-grid img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;border:4px solid #fff;box-shadow:var(--shadow);cursor:zoom-in;background:var(--paper2)}
+.spot-photos{display:grid;gap:.3rem}
+.spot-thumbs{display:grid;grid-template-columns:repeat(3,1fr);gap:.6rem}
+.spot-thumbs:empty{display:none}
+.spot-thumb{position:relative}
+.spot-thumb img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;border:3px solid #fff;box-shadow:var(--shadow);display:block}
+.spot-thumb .x{position:absolute;top:-8px;right:-8px;width:32px;height:32px}
+.spot-photos .add-photo-btn{justify-self:start}
+.spot-photo-msg{margin:0}
+.spot-photo-msg:empty{display:none}
+@media (min-width:600px){
+  .spot-photo-grid{grid-template-columns:repeat(4,1fr)}
+  .spot-thumbs{grid-template-columns:repeat(4,1fr)}
+}
