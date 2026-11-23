@@ -430,7 +430,16 @@
         days.forEach(function (d, i) {
           var box = h('div', { class: 'day' }, h('h3', {}, h('span', { class: 'day-no', text: '第 ' + (i + 1) + ' 天' }), h('span', { text: d.title || '' })));
           (d.spots || []).forEach(function (s) {
-            box.appendChild(h('div', { class: s._no ? 'spot numbered' : 'spot' }, s._no ? h('span', { class: 'spot-no', text: String(s._no) }) : null, h('b', { text: s.name }), s.note ? h('div', { class: 'note', text: s.note }) : null));
+            var sp = h('div', { class: s._no ? 'spot numbered' : 'spot' }, s._no ? h('span', { class: 'spot-no', text: String(s._no) }) : null, h('b', { text: s.name }), s.note ? h('div', { class: 'note', text: s.note }) : null);
+            if (Array.isArray(s.photoIds) && s.photoIds.length) {
+              var sg = h('div', { class: 'spot-photo-grid' });
+              s.photoIds.forEach(function (pid) {
+                var src = '/api/photos/' + encodeURIComponent(pid);
+                sg.appendChild(h('img', { src: src, alt: s.name + ' 的照片', loading: 'lazy', onclick: function () { openLightbox(src); } }));
+              });
+              sp.appendChild(sg);
+            }
+            box.appendChild(sp);
           });
           wrap.appendChild(box);
         });
@@ -513,6 +522,7 @@
       openPicker(pos, view, function (lat, lng) { pos = { lat: lat, lng: lng }; syncPos(); });
     } });
 
+    var photos = buildPhotoPicker([], MAX_SPOT_PHOTOS);
     var errBox = h('div');
     var saveBtn = h('button', { class: 'btn primary', type: 'submit', text: '保存' });
     var overlay = h('div', { class: 'picker add-spot', role: 'dialog', 'aria-modal': 'true', 'aria-label': '添加节点' });
@@ -532,6 +542,9 @@
       if (!name) { fail('请填写节点名称。'); nameIn.focus(); return; }
       var spot = { name: name, note: noteIn.value.trim() };
       if (pos) { spot.lat = pos.lat; spot.lng = pos.lng; }
+      if (photos.isBusy()) { fail('照片还在上传中，请稍等一下。'); return; }
+      var pids = photos.getIds();
+      if (pids.length) spot.photoIds = pids;
       var newDays = JSON.parse(JSON.stringify(days));
       newDays.forEach(function (d) { (d.spots || []).forEach(function (s) { delete s._no; }); });
       if (sel.value === 'new') newDays.push({ title: dayTitle.value.trim(), spots: [spot] });
@@ -562,6 +575,7 @@
       h('div', {}, h('label', { text: '节点名称（必填）' }), nameIn),
       h('div', {}, h('label', { text: '备注' }), noteIn),
       h('div', { class: 'add-spot-pos' }, pickBtn, clearPos, posText),
+      photos.el,
       errBox,
       h('div', { class: 'actions' }, saveBtn, h('button', { class: 'btn', type: 'button', text: '取消', onclick: shut })));
     overlay.appendChild(h('div', { class: 'picker-card' }, h('h3', { text: '＋ 添加节点' }), form));
@@ -638,6 +652,56 @@
     }).then(function (r) { return r.id; });
   }
 
+  // 节点图片选择器：选择 → 压缩上传 → 缩略图（可移除），最多 max 张
+  var MAX_SPOT_PHOTOS = 10;
+  function buildPhotoPicker(initialIds, max) {
+    var ids = Array.isArray(initialIds) ? initialIds.slice(0, max) : [];
+    var busy = false;
+    var thumbs = h('div', { class: 'spot-thumbs' });
+    var msg = h('p', { class: 'hint spot-photo-msg' });
+    var input = h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true });
+    var btn = h('button', { class: 'btn small-btn add-photo-btn', type: 'button', text: '📷 添加图片', onclick: function () { input.click(); } });
+    function draw() {
+      clear(thumbs);
+      ids.forEach(function (pid, i) {
+        thumbs.appendChild(h('div', { class: 'spot-thumb' },
+          h('img', { src: '/api/photos/' + encodeURIComponent(pid), alt: '节点图片', loading: 'lazy' }),
+          h('button', { class: 'x', type: 'button', 'aria-label': '移除图片', text: '✕', onclick: function () { ids.splice(i, 1); draw(); } })));
+      });
+    }
+    draw();
+    input.addEventListener('change', function () {
+      var files = Array.prototype.slice.call(input.files || []);
+      input.value = '';
+      if (!files.length) return;
+      var room = max - ids.length;
+      if (room <= 0) { toast('每个节点最多 ' + max + ' 张图片'); return; }
+      if (files.length > room) { toast('每个节点最多 ' + max + ' 张图片，已只取前 ' + room + ' 张'); files = files.slice(0, room); }
+      busy = true;
+      btn.disabled = true;
+      var done = 0, failed = 0;
+      function next() {
+        if (!files.length) {
+          busy = false;
+          btn.disabled = false;
+          msg.textContent = failed ? '有 ' + failed + ' 张图片上传失败，请重试。' : '上传完成 ✓';
+          return;
+        }
+        var f = files.shift();
+        msg.textContent = '正在处理第 ' + (done + failed + 1) + ' 张…';
+        uploadPhoto(f).then(function (pid) { ids.push(pid); done++; draw(); }, function (e) {
+          failed++; toast(e.message);
+        }).then(next);
+      }
+      next();
+    });
+    return {
+      el: h('div', { class: 'spot-photos' }, thumbs, btn, input, msg),
+      getIds: function () { return ids.slice(); },
+      isBusy: function () { return busy; }
+    };
+  }
+
   // ---------- form ----------
   function renderForm(id) {
     clear(app);
@@ -705,10 +769,12 @@
       var no = h('span', { class: 'spot-no', 'aria-hidden': 'true' });
       var up = h('button', { class: 'mv', type: 'button', 'aria-label': '上移景点', text: '↑' });
       var down = h('button', { class: 'mv', type: 'button', 'aria-label': '下移景点', text: '↓' });
-      var row = h('div', { class: 'spotform' }, h('div', { class: 'fields' }, name, note, posBox),
+      var photos = buildPhotoPicker(s && s.photoIds, MAX_SPOT_PHOTOS);
+      var row = h('div', { class: 'spotform' }, h('div', { class: 'fields' }, name, note, posBox, photos.el),
         h('div', { class: 'side' }, no, up, down,
           h('button', { class: 'x', type: 'button', 'aria-label': '删除景点', text: '✕', onclick: function () { spotsBox.removeChild(row); renumberSpots(spotsBox); } })));
       row._pos = validPos(s) ? { lat: s.lat, lng: s.lng } : null;
+      row._photos = photos;
       row._no = no; row._up = up; row._down = down;
       function drawPos() {
         clear(posBox);
@@ -811,7 +877,8 @@
       e.preventDefault();
       clear(errBox);
       function fail(msg) { errBox.appendChild(h('div', { class: 'err', text: msg })); errBox.scrollIntoView({ block: 'center' }); }
-      if (uploading) return fail('照片还在上传中，请稍等一下。');
+      var spotBusy = Array.prototype.some.call(daysBox.querySelectorAll('.spotform'), function (r) { return r._photos && r._photos.isBusy(); });
+      if (uploading || spotBusy) return fail('照片还在上传中，请稍等一下。');
       var title = fTitle.value.trim(), dest = fDest.value.trim();
       if (!title) return fail('请填写行程标题。');
       if (!dest) return fail('请填写目的地。');
@@ -824,6 +891,8 @@
           if (!nm) return;
           var spot = { name: nm, note: nt };
           if (sp._pos) { spot.lat = sp._pos.lat; spot.lng = sp._pos.lng; }
+          var pids = sp._photos ? sp._photos.getIds() : [];
+          if (pids.length) spot.photoIds = pids;
           spots.push(spot);
         });
         var dt = box._title.value.trim();
