@@ -159,7 +159,15 @@ function validateTrip(body) {
       title: str(d, "title", 100),
       spots: spots.map((s) => {
         if (!isObj(s)) throw new HttpError(400, "each spot must be an object");
-        return { name: str(s, "name", 100), note: str(s, "note", 500), ...coords(s) };
+        const sp = { name: str(s, "name", 100), note: str(s, "note", 500), ...coords(s) };
+        const pids = s.photoIds === undefined || s.photoIds === null ? [] : s.photoIds;
+        if (!Array.isArray(pids)) throw new HttpError(400, "spot photoIds must be an array");
+        if (pids.length > 10) throw new HttpError(400, "at most 10 photos per spot");
+        if (!pids.every((i) => Number.isInteger(i) && i > 0)) {
+          throw new HttpError(400, "spot photoIds must be positive integers");
+        }
+        sp.photoIds = [...new Set(pids)];
+        return sp;
       }),
     };
   });
@@ -183,6 +191,18 @@ function validateTrip(body) {
     throw new HttpError(400, "photoIds must be positive integers");
   }
   trip.photoIds = [...new Set(ids)];
+
+  const seen = new Set(trip.photoIds);
+  for (const d of trip.days) {
+    for (const s of d.spots) {
+      for (const pid of s.photoIds) {
+        if (seen.has(pid)) throw new HttpError(400, `photo ${pid} is used more than once`);
+        seen.add(pid);
+      }
+    }
+  }
+  if (seen.size - trip.photoIds.length > 100) throw new HttpError(400, "at most 100 spot photos");
+  trip.allPhotoIds = [...seen];
   return trip;
 }
 
@@ -435,6 +455,16 @@ function createServer(dbPath) {
   };
 
   function fullTrip(row) {
+    const days = JSON.parse(row.days_json).map((d) => ({
+      ...d,
+      spots: (d.spots || []).map((s) => ({
+        ...s,
+        lat: typeof s.lat === "number" ? s.lat : null,
+        lng: typeof s.lng === "number" ? s.lng : null,
+        photoIds: Array.isArray(s.photoIds) ? s.photoIds : [],
+      })),
+    }));
+    const spotIds = new Set(days.flatMap((d) => d.spots.flatMap((s) => s.photoIds)));
     return {
       id: row.id,
       title: row.title,
@@ -445,16 +475,9 @@ function createServer(dbPath) {
       transport: row.transport,
       lodging: row.lodging,
       tips: row.tips,
-      days: JSON.parse(row.days_json).map((d) => ({
-        ...d,
-        spots: (d.spots || []).map((s) => ({
-          ...s,
-          lat: typeof s.lat === "number" ? s.lat : null,
-          lng: typeof s.lng === "number" ? s.lng : null,
-        })),
-      })),
+      days,
       budget: JSON.parse(row.budget_json),
-      photoIds: q.tripPhotoIds.all(row.id).map((r) => Number(r.id)),
+      photoIds: q.tripPhotoIds.all(row.id).map((r) => Number(r.id)).filter((i) => !spotIds.has(i)),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -632,7 +655,7 @@ function createServer(dbPath) {
             JSON.stringify(t.days), JSON.stringify(t.budget), key, now, now, user.id
           );
           const tid = Number(r.lastInsertRowid);
-          attachPhotos(tid, t.photoIds);
+          attachPhotos(tid, t.allPhotoIds);
           return tid;
         });
         return sendJson(res, 201, fullTrip(q.getTrip.get(id)));
@@ -668,7 +691,7 @@ function createServer(dbPath) {
             t.title, t.destination, t.summary, t.transport, t.lodging, t.tips,
             JSON.stringify(t.days), JSON.stringify(t.budget), new Date().toISOString(), id
           );
-          attachPhotos(id, t.photoIds);
+          attachPhotos(id, t.allPhotoIds);
         });
         return sendJson(res, 200, fullTrip(q.getTrip.get(id)));
       }
