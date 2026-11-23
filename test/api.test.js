@@ -86,7 +86,7 @@ test("create, list, get, update, delete", async () => {
   const got = await api("GET", `/api/trips/${id}`);
   assert.equal(got.status, 200);
   assert.equal(got.body.editKey, undefined);
-  assert.deepEqual(got.body.days, [{ title: "Day 1", spots: [{ name: "A", note: "n", lat: null, lng: null }] }]);
+  assert.deepEqual(got.body.days, [{ title: "Day 1", spots: [{ name: "A", note: "n", lat: null, lng: null, photoIds: [] }] }]);
   assert.deepEqual(got.body.photoIds, []);
 
   const body = { ...sample(), title: "改名后" };
@@ -137,6 +137,107 @@ test("photo upload, download, attach and delete with trip", async () => {
 
   await api("DELETE", `/api/trips/${c.body.id}`, undefined, ownerAuth);
   assert.equal((await fetch(`${base}/api/photos/${photoId}`)).status, 404);
+});
+
+async function uploadPhoto(auth = ownerAuth) {
+  const up = await fetch(base + "/api/photos", {
+    method: "POST",
+    headers: { "Content-Type": "image/png", ...auth },
+    body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 9, 9]),
+  });
+  return up;
+}
+
+test("spot photoIds: save, read back, top-level excludes them, release on PUT", async () => {
+  assert.equal((await uploadPhoto({})).status, 401);
+  const ids = [];
+  for (let i = 0; i < 4; i++) ids.push((await (await uploadPhoto()).json()).id);
+  const [a, b, c, wall] = ids;
+  const body = {
+    ...sample(),
+    days: [
+      { title: "D1", spots: [{ name: "A", note: "", photoIds: [a, b] }, { name: "B", note: "" }] },
+      { title: "D2", spots: [{ name: "C", note: "", photoIds: [c] }] },
+    ],
+    photoIds: [wall],
+  };
+  const r = await api("POST", "/api/trips", body, ownerAuth);
+  assert.equal(r.status, 201);
+  const g = await api("GET", `/api/trips/${r.body.id}`);
+  assert.deepEqual(g.body.days[0].spots[0].photoIds, [a, b]);
+  assert.deepEqual(g.body.days[0].spots[1].photoIds, []);
+  assert.deepEqual(g.body.days[1].spots[0].photoIds, [c]);
+  assert.deepEqual(g.body.photoIds, [wall]);
+
+  // PUT removing b from the spot releases it
+  body.days[0].spots[0].photoIds = [a];
+  const u = await api("PUT", `/api/trips/${r.body.id}`, body, ownerAuth);
+  assert.equal(u.status, 200);
+  assert.equal((await fetch(`${base}/api/photos/${b}`)).status, 200);
+  const row = server.db.prepare("SELECT trip_id FROM photos WHERE id = ?").get(b);
+  assert.equal(row.trip_id, null);
+  // released photo can be used by another trip
+  const other = await api("POST", "/api/trips", { ...sample(), photoIds: [b] }, ownerAuth);
+  assert.equal(other.status, 201);
+  // round-trip of the whole document (as the client's "+" flow does)
+  const again = await api("PUT", `/api/trips/${r.body.id}`, u.body, ownerAuth);
+  assert.equal(again.status, 200);
+  assert.deepEqual(again.body.days[0].spots[0].photoIds, [a]);
+  assert.deepEqual(again.body.photoIds, [wall]);
+
+  await api("DELETE", `/api/trips/${r.body.id}`, undefined, ownerAuth);
+  assert.equal((await fetch(`${base}/api/photos/${a}`)).status, 404);
+  await api("DELETE", `/api/trips/${other.body.id}`, undefined, ownerAuth);
+});
+
+test("spot photoIds validation and legacy spots", async () => {
+  const withSpots = (spots, extra = {}) => ({
+    ...sample(), days: [{ title: "D", spots }], ...extra,
+  });
+  const x = (await (await uploadPhoto()).json()).id;
+  const y = (await (await uploadPhoto()).json()).id;
+  const tooMany = Array.from({ length: 11 }, (_, i) => i + 1);
+  const bads = [
+    withSpots([{ name: "A", photoIds: tooMany }]),
+    withSpots([{ name: "A", photoIds: "1" }]),
+    withSpots([{ name: "A", photoIds: [0] }]),
+    withSpots([{ name: "A", photoIds: [1.5] }]),
+    withSpots([{ name: "A", photoIds: ["2"] }]),
+    withSpots([{ name: "A", photoIds: [x] }, { name: "B", photoIds: [x] }]),
+    withSpots([{ name: "A", photoIds: [x] }], { photoIds: [x] }),
+    withSpots([{ name: "A", photoIds: [987654] }]),
+    {
+      ...sample(),
+      days: Array.from({ length: 11 }, () => ({
+        title: "D",
+        spots: Array.from({ length: 10 }, () => ({ name: "S", photoIds: [] })),
+      })).map((d, di) => ({
+        ...d,
+        spots: d.spots.map((s, si) => ({ ...s, photoIds: Array.from({ length: 10 }, (_, k) => di * 100 + si * 10 + k + 1) })),
+      })),
+    },
+  ];
+  for (const b of bads) {
+    assert.equal((await api("POST", "/api/trips", b, ownerAuth)).status, 400);
+  }
+  // failed attempts must not have grabbed the photos
+  const ok = await api("POST", "/api/trips", withSpots([{ name: "A", photoIds: [x, x] }, { name: "B", photoIds: null }]), ownerAuth);
+  assert.equal(ok.status, 201);
+  assert.deepEqual(ok.body.days[0].spots[0].photoIds, [x]);
+  assert.deepEqual(ok.body.days[0].spots[1].photoIds, []);
+  // a photo owned by another trip is rejected
+  assert.equal((await api("POST", "/api/trips", withSpots([{ name: "A", photoIds: [x] }]), ownerAuth)).status, 400);
+  // spot photos can be the list cover
+  const list = await api("GET", "/api/trips?q=" + encodeURIComponent("测试行程"));
+  assert.equal(list.body.trips.find((t) => t.id === ok.body.id).coverPhotoId, x);
+  // legacy stored spot without photoIds reads as []
+  server.db.prepare("UPDATE trips SET days_json = ? WHERE id = ?")
+    .run(JSON.stringify([{ title: "L", spots: [{ name: "old" }] }]), ok.body.id);
+  const legacy = await api("GET", `/api/trips/${ok.body.id}`);
+  assert.deepEqual(legacy.body.days[0].spots[0].photoIds, []);
+  assert.deepEqual(legacy.body.photoIds, [x]);
+  assert.equal((await api("PUT", `/api/trips/${ok.body.id}`, sample(), ownerAuth)).status, 200);
+  void y;
 });
 
 test("photo validation", async () => {
